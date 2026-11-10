@@ -1821,7 +1821,22 @@ def has_spawnable_review(conn: sqlite3.Connection) -> bool:
 def review_dispatch_enabled() -> bool:
     """Whether review tasks dispatch automatically. Default true (Hermes ships
     ``sdlc-review``); operators disable it for human-only review boards.
+
+    Per-invocation override: the ``HERMES_KANBAN_DISPATCH_LANES`` env var, when
+    set, wins over ``config.yaml`` for THIS process only — e.g. a scheduled
+    caller runs ``HERMES_KANBAN_DISPATCH_LANES=ready hermes kanban dispatch``
+    on a timer to never re-claim the review lane, without flipping the
+    board-wide ``kanban.review_dispatch`` config (which would also silently
+    stop every human's manual review dispatch). Accepted values are a
+    comma-separated lane list; ``review`` or ``all`` present means review
+    dispatch stays on, anything else (e.g. ``ready``) turns it off. Unset/blank
+    falls through to config, so this is a no-op for every other caller.
     """
+    lanes_override = os.environ.get("HERMES_KANBAN_DISPATCH_LANES", "").strip().lower()
+    if lanes_override:
+        tokens = {t.strip() for t in lanes_override.split(",") if t.strip()}
+        if tokens:
+            return "review" in tokens or "all" in tokens
     try:
         from hermes_cli.config import load_config
         return bool((load_config() or {}).get("kanban", {}).get("review_dispatch", True))
@@ -1991,6 +2006,7 @@ def dispatch_once(
     default_assignee: Optional[str] = None,
     max_in_progress_per_profile: Optional[int] = None,
     reconcile_orphans: bool = True,
+    review_dispatch: Optional[bool] = None,
 ) -> DispatchResult:
     """Run one dispatcher tick under the board's single-writer lock.
 
@@ -1999,6 +2015,10 @@ def dispatch_once(
     frames. The loser returns an empty ``DispatchResult`` with
     ``skipped_locked=True`` and writes nothing; the lock is keyed on the
     resolved DB path so unrelated boards tick in parallel.
+
+    ``review_dispatch``: per-call override forwarded to
+    :func:`_dispatch_once_locked` — ``False`` skips the review lane for just
+    this tick (the ``hermes kanban dispatch --no-review-lane`` plumbing).
     """
     def _locked_tick() -> DispatchResult:
         return _dispatch_once_locked(
@@ -2014,6 +2034,7 @@ def dispatch_once(
             default_assignee=default_assignee,
             max_in_progress_per_profile=max_in_progress_per_profile,
             reconcile_orphans=reconcile_orphans,
+            review_dispatch=review_dispatch,
         )
 
     try:
@@ -2366,12 +2387,19 @@ def _dispatch_once_locked(
     default_assignee: Optional[str] = None,
     max_in_progress_per_profile: Optional[int] = None,
     reconcile_orphans: bool = True,
+    review_dispatch: Optional[bool] = None,
 ) -> DispatchResult:
     """One dispatcher tick: reclaim stale/crashed running tasks, promote
     todo -> ready, then atomically claim each spawnable ready/review row and
     call ``spawn_fn(task, workspace_path, board) -> Optional[int]``, recording
     the PID so later ticks catch crashes before the TTL. Cap semantics:
-    :func:`_tick_spawn_budget`."""
+    :func:`_tick_spawn_budget`.
+
+    ``review_dispatch``: per-call override of :func:`review_dispatch_enabled`.
+    ``None`` (default) defers to that function (config + env var); ``True``/
+    ``False`` forces the review lane on/off for just this tick regardless of
+    config or env — the CLI ``--no-review-lane`` flag's plumbing.
+    """
     result = DispatchResult()
     _run_reclaim_phase(
         conn, result, stale_timeout_seconds=stale_timeout_seconds,
@@ -2386,7 +2414,8 @@ def _dispatch_once_locked(
     ready_rows = _lane_rows(conn, "ready")
     # Review rows are enumerated up front so the budget split can see whether
     # review work exists at all.
-    review_rows = _lane_rows(conn, "review") if review_dispatch_enabled() else []
+    _review_on = review_dispatch_enabled() if review_dispatch is None else bool(review_dispatch)
+    review_rows = _lane_rows(conn, "review") if _review_on else []
     # Per-profile cap. Deferred tasks go to skipped_per_profile_capped, not
     # skipped_unassigned — "busy, retry later" differs from "needs routing".
     # Resolved BEFORE the review reservation so the reservation can see which

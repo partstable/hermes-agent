@@ -366,6 +366,12 @@ _SPECS = [
         _arg("--failure-limit", type=int, default=kbd.DEFAULT_FAILURE_LIMIT,
              help=f"Auto-block a task after this many consecutive non-success attempts "
                   f"(spawn_failed, timed_out, or crashed; default: {kbd.DEFAULT_FAILURE_LIMIT})"),
+        _arg("--no-review-lane", action="store_true",
+             help="Skip the review lane for just this invocation (ready lane only) — "
+                  "for scheduled/automated callers that must not re-claim review tasks. "
+                  "Leaves the board-wide kanban.review_dispatch config and every other "
+                  "(e.g. human manual) dispatch call unaffected. Equivalent to setting "
+                  "HERMES_KANBAN_DISPATCH_LANES=ready for this process only."),
         _json_flag(),
     ], help="One dispatcher pass: reclaim stale, promote ready, spawn workers"),
     _cmd("daemon", [
