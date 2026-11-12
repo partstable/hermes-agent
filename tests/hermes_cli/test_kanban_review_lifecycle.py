@@ -422,6 +422,83 @@ def test_review_dispatch_gate_prevents_phantom_reviewer(
         assert tid in [s[0] for s in res_on.spawned]
 
 
+def test_review_dispatch_lanes_env_var_overrides_config_per_process(
+    kanban_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``HERMES_KANBAN_DISPATCH_LANES=ready`` skips the review lane for this
+    process even with the board-wide config gate ON — the per-invocation
+    opt-out a scheduled caller sets without touching config.yaml (t_4e82334b).
+    An empty/unset env var is a no-op: config alone decides.
+    """
+    import hermes_cli.config as cfgmod
+    import hermes_cli.profiles as profmod
+
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="park", assignee="worker")
+        kb.claim_task(conn, tid)
+        kb.request_review(
+            conn, tid, summary="done",
+            expected_run_id=kb.get_task(conn, tid).current_run_id,
+        )
+        assert kb.get_task(conn, tid).status == "review"
+
+        monkeypatch.setattr(profmod, "profile_exists", lambda name: True)
+        # Board-wide gate stays ON throughout — only the env var changes.
+        monkeypatch.setattr(
+            cfgmod, "load_config",
+            lambda *a, **k: {"kanban": {"review_dispatch": True}},
+        )
+
+        # Env var says "ready lane only" -> review task is left alone, even
+        # though config says review_dispatch=True.
+        monkeypatch.setenv("HERMES_KANBAN_DISPATCH_LANES", "ready")
+        res_scoped = kbd.dispatch_once(conn, dry_run=True)
+        assert tid not in [s[0] for s in res_scoped.spawned]
+        assert kb.get_task(conn, tid).status == "review"
+
+        # Clearing the env var falls back to config (ON) -> claimed again.
+        monkeypatch.delenv("HERMES_KANBAN_DISPATCH_LANES", raising=False)
+        res_fallback = kbd.dispatch_once(conn, dry_run=True)
+        assert tid in [s[0] for s in res_fallback.spawned]
+
+
+def test_dispatch_no_review_lane_flag_skips_review_without_touching_config(
+    kanban_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``hermes kanban dispatch --no-review-lane`` (``dispatch_once(...,
+    review_dispatch=False)``) skips the review lane for just that call,
+    leaving ``kanban.review_dispatch=True`` (and therefore every other,
+    e.g. human manual, dispatch invocation) unaffected (t_4e82334b).
+    """
+    import hermes_cli.config as cfgmod
+    import hermes_cli.profiles as profmod
+
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="park", assignee="worker")
+        kb.claim_task(conn, tid)
+        kb.request_review(
+            conn, tid, summary="done",
+            expected_run_id=kb.get_task(conn, tid).current_run_id,
+        )
+        assert kb.get_task(conn, tid).status == "review"
+
+        monkeypatch.setattr(profmod, "profile_exists", lambda name: True)
+        monkeypatch.setattr(
+            cfgmod, "load_config",
+            lambda *a, **k: {"kanban": {"review_dispatch": True}},
+        )
+
+        # This call opts out -> review task untouched despite config=True.
+        res_override = kbd.dispatch_once(conn, dry_run=True, review_dispatch=False)
+        assert tid not in [s[0] for s in res_override.spawned]
+        assert kb.get_task(conn, tid).status == "review"
+
+        # A plain call right after (no override) still honours config=True —
+        # the opt-out was scoped to the one call, not sticky.
+        res_default = kbd.dispatch_once(conn, dry_run=True)
+        assert tid in [s[0] for s in res_default.spawned]
+
+
 def test_active_pr_guard_skipped_for_review_lane_but_defers_ready_lane(
     kanban_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
