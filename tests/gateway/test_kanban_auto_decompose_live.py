@@ -25,10 +25,12 @@ def test_disabled_when_flag_false():
     assert enabled is False
 
 
-def test_block_loop_grace_default_is_300():
-    """No explicit config -> the fail-safe default (300s), not 0 (no grace),
-    so a fresh install is protected from the t_e3517120/t_59786b01 race."""
-    assert _resolve_auto_decompose_block_loop_grace_seconds(dict) == 300
+def test_block_loop_grace_default_is_900():
+    """No explicit config -> the fail-safe default (900s), not 0 (no grace),
+    so a fresh install is protected from the t_e3517120/t_59786b01 race.
+    900s (not the original 300s) because the merge-exec reply that actually
+    resolved that incident landed at T+415s -- 300s would still expire first."""
+    assert _resolve_auto_decompose_block_loop_grace_seconds(dict) == 900
 
 
 def test_block_loop_grace_reads_configured_value():
@@ -51,6 +53,6 @@ def test_block_loop_grace_fails_safe_on_config_error():
     def _boom():
         raise RuntimeError("config read failed")
 
-    assert _resolve_auto_decompose_block_loop_grace_seconds(_boom) == 300
+    assert _resolve_auto_decompose_block_loop_grace_seconds(_boom) == 900
 
 

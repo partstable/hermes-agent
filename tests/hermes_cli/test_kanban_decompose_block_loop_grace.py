@@ -117,3 +117,59 @@ def test_zero_grace_matches_pre_fix_behaviour(kanban_home: Path) -> None:
         _escalate_to_triage_via_block_loop(conn, tid)
         assert tid in decomp.list_triage_ids(min_triage_age_seconds=0)
         assert tid in decomp.list_triage_ids()
+
+
+def test_comment_after_block_event_pushes_grace_window_forward(kanban_home: Path) -> None:
+    """Regression for tony-lean's changes-requested round on t_e428aaf3: a flat
+    window measured only from the ``block_loop_detected`` event still races a
+    reviewer thread that keeps talking after the block fires (t_e3517120's own
+    timeline had a PASS at T+104s, then the merge-exec reply that actually
+    resolved things at T+415s -- a single fixed budget from the block alone
+    can't cover that). A comment posted on the card AFTER the block event must
+    reset the grace window to measure from the comment, not the original block.
+    """
+    with kbc.connect_closing() as conn:
+        tid = _running_task(conn)
+        _escalate_to_triage_via_block_loop(conn, tid)
+
+        # Backdate the block event past the grace window -- on its own this
+        # would already make the card eligible (same as
+        # test_aged_block_loop_card_is_eligible_once_grace_elapses).
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE task_events SET created_at = created_at - 400 "
+                "WHERE task_id = ? AND kind = 'block_loop_detected'",
+                (tid,),
+            )
+        assert tid in decomp.list_triage_ids(min_triage_age_seconds=300)
+
+        # A reviewer comment lands just now -- well AFTER the (backdated)
+        # block event -- which resets the window to measure from the comment.
+        kb.add_comment(conn, tid, "tony-lean", "still reviewing, one sec")
+        assert tid not in decomp.list_triage_ids(min_triage_age_seconds=300)
+
+
+def test_comment_before_block_event_does_not_reset_window(kanban_home: Path) -> None:
+    """A comment that predates the ``block_loop_detected`` event (e.g. the
+    reason text on the block itself, or stale chatter from round 1) must not
+    count as in-flight activity -- only a reply posted AFTER the block fired
+    proves someone is actively working the card right now."""
+    with kbc.connect_closing() as conn:
+        tid = _running_task(conn)
+        _escalate_to_triage_via_block_loop(conn, tid)
+        kb.add_comment(conn, tid, "someone", "earlier chatter, before any block")
+
+        # Push the comment well before the block event, then push the block
+        # event itself past the grace window -- the stale comment must not
+        # resurrect a window that has otherwise expired.
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE task_comments SET created_at = created_at - 1000 WHERE task_id = ?",
+                (tid,),
+            )
+            conn.execute(
+                "UPDATE task_events SET created_at = created_at - 400 "
+                "WHERE task_id = ? AND kind = 'block_loop_detected'",
+                (tid,),
+            )
+        assert tid in decomp.list_triage_ids(min_triage_age_seconds=300)

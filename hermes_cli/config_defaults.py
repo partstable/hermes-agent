@@ -1929,9 +1929,13 @@ DEFAULT_CONFIG = {
         # a grace window the decomposer can race that in-flight reply and fan real duplicate workers out
         # onto work a human already finished (t_e3517120/t_59786b01, 2026-11-18: a PR was independently
         # re-verified and merged one minute before the auto-decomposer split the same card into 4
-        # children, two of which started real duplicate work before a human caught it). 0 disables the
-        # grace window (pre-fix behaviour: decompose the instant a card lands in triage).
-        "auto_decompose_block_loop_grace_seconds": 300,
+        # children, two of which started real duplicate work before a human caught it). 900s (not 300s)
+        # because the merge-exec reply that actually resolved that incident landed at T+415s — a flat
+        # 300s window would still have expired first. This is only the floor: list_triage_ids() also
+        # pushes the window forward on every comment posted after the block event, so a reviewer thread
+        # that runs long isn't raced just because it crossed one fixed number. 0 disables the grace
+        # window entirely (pre-fix behaviour: decompose the instant a card lands in triage).
+        "auto_decompose_block_loop_grace_seconds": 900,
         # Running tasks with no heartbeat (last_heartbeat_at) for this many seconds are reclaimed to
         # ready on the next tick; a still-running local worker is terminated first. 0 = off.
         "dispatch_stale_timeout_seconds": 14400,
