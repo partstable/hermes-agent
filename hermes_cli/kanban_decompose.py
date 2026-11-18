@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from dataclasses import dataclass
 from typing import Optional
 
@@ -336,8 +337,49 @@ def decompose_task(
     return _apply_fanout(task_id, parsed, routing, audit_author)
 
 
-def list_triage_ids(*, tenant: Optional[str] = None) -> list[str]:
-    """Return task ids currently in the triage column."""
+def list_triage_ids(*, tenant: Optional[str] = None, min_triage_age_seconds: int = 0) -> list[str]:
+    """Return task ids currently in the triage column.
+
+    ``min_triage_age_seconds`` (auto-decompose's gateway tick only — manual
+    ``hermes kanban decompose`` / ``--all`` always pass 0, immediate by
+    design) excludes a task whose most recent ``block_loop_detected`` event
+    is younger than this many seconds.
+
+    The unblock-loop breaker (``BLOCK_RECURRENCE_LIMIT`` in ``kanban_db.py``)
+    routes a card to ``triage`` the INSTANT a same-``kind`` block repeats —
+    including a legitimate ``needs_input`` card that was correctly waiting on
+    a named human reviewer and just got answered seconds earlier (the
+    recurrence counter only compares ``kind``, not whether the two blocks
+    were for the same unresolved cause). Running the decomposer against that
+    card before the in-flight human reply (review PASS, merge-exec) lands
+    spawns real duplicate workers on work that is already done — see
+    t_e3517120 / t_59786b01 (2026-11-18): a PR was independently re-verified
+    and merged one minute before the auto-decomposer fanned the same card
+    into 4 children, two of which started real duplicate work before a human
+    caught it. A short grace window lets that kind of just-in-time reply
+    resolve the card on its own before the decomposer ever touches it.
+
+    A task that reached ``triage`` any OTHER way (operator `hermes kanban
+    triage`, direct status edit, a rough idea dropped by a user) has no
+    ``block_loop_detected`` event and is never held back by this.
+    """
     with kbc.connect_closing() as conn:
         rows = kb.list_tasks(conn, status="triage", tenant=tenant, limit=1000)
-    return [row.id for row in rows]
+        if min_triage_age_seconds <= 0:
+            return [row.id for row in rows]
+        now = int(time.time())
+        return [
+            row.id for row in rows
+            if (entered_at := _latest_block_loop_detected_at(conn, row.id)) is None
+            or (now - entered_at) >= min_triage_age_seconds
+        ]
+
+
+def _latest_block_loop_detected_at(conn, task_id: str) -> Optional[int]:
+    """Epoch of the most recent ``block_loop_detected`` event on ``task_id``, or ``None``."""
+    row = conn.execute(
+        "SELECT created_at FROM task_events WHERE task_id = ? AND kind = 'block_loop_detected' "
+        "ORDER BY created_at DESC, id DESC LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    return kb._to_epoch(row["created_at"]) if row is not None else None

@@ -1921,6 +1921,17 @@ DEFAULT_CONFIG = {
         # Max triage tasks decomposed per tick, bounding the aux-LLM burst from a bulk load. Excess
         # defers to the next tick.
         "auto_decompose_per_tick": 3,
+        # Withhold a triage card from the auto-decompose tick while it is still within this many
+        # seconds of its most recent `block_loop_detected` event (the unblock-loop breaker's escalation
+        # to triage, NOT a manually-triaged idea — those decompose immediately, ungated). The breaker
+        # fires the instant a same-kind block repeats, including a legitimate `needs_input` card that
+        # was correctly waiting on a named human reviewer and just got answered seconds earlier; without
+        # a grace window the decomposer can race that in-flight reply and fan real duplicate workers out
+        # onto work a human already finished (t_e3517120/t_59786b01, 2026-11-18: a PR was independently
+        # re-verified and merged one minute before the auto-decomposer split the same card into 4
+        # children, two of which started real duplicate work before a human caught it). 0 disables the
+        # grace window (pre-fix behaviour: decompose the instant a card lands in triage).
+        "auto_decompose_block_loop_grace_seconds": 300,
         # Running tasks with no heartbeat (last_heartbeat_at) for this many seconds are reclaimed to
         # ready on the next tick; a still-running local worker is terminated first. 0 = off.
         "dispatch_stale_timeout_seconds": 14400,

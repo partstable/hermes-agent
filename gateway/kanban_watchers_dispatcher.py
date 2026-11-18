@@ -243,11 +243,18 @@ class _KanbanDispatcher:
                             conn.close()
         return False
 
-    def auto_decompose_tick(self, auto_decompose_per_tick: int) -> int:
+    def auto_decompose_tick(self, auto_decompose_per_tick: int, block_loop_grace_seconds: int = 0) -> int:
         """Auto-decompose up to N triage tasks across all boards into ready workgraphs.
 
         Runs before dispatch fans out; the per-tick cap keeps a bulk triage
-        load from burst-spending the aux LLM. Returns the number decomposed.
+        load from burst-spending the aux LLM. ``block_loop_grace_seconds``
+        (``kanban.auto_decompose_block_loop_grace_seconds``) withholds a
+        triage card from THIS tick's candidates while it is still inside its
+        grace window after a ``block_loop_detected`` escalation — see
+        :func:`hermes_cli.kanban_decompose.list_triage_ids`'s docstring for
+        why (t_e3517120/t_59786b01: the decomposer raced an in-flight human
+        review reply and fanned out real duplicate work on an already-merged
+        PR). Returns the number decomposed.
         """
         try:
             from hermes_cli import kanban_decompose as _decomp
@@ -267,7 +274,14 @@ class _KanbanDispatcher:
                 # and spawned subprocess that names no board would resolve this one instead.
                 with scoped_current_board(slug):
                     try:
-                        triage_ids = _decomp.list_triage_ids()
+                        # Only pass the new kwarg when it would actually change behaviour —
+                        # grace<=0 calls the exact old zero-arg shape so any caller/test double
+                        # still matching that signature (pre-dating this kwarg) keeps working.
+                        triage_ids = (
+                            _decomp.list_triage_ids(min_triage_age_seconds=block_loop_grace_seconds)
+                            if block_loop_grace_seconds > 0
+                            else _decomp.list_triage_ids()
+                        )
                     except Exception as exc:
                         logger.debug("kanban auto-decompose: list_triage_ids failed on board %s (%s)", slug, exc)
                         triage_ids = []

@@ -10,7 +10,10 @@ called every tick, reading the current config.
 from __future__ import annotations
 
 
-from gateway.kanban_watchers_common import _resolve_auto_decompose_settings
+from gateway.kanban_watchers_common import (
+    _resolve_auto_decompose_settings,
+    _resolve_auto_decompose_block_loop_grace_seconds,
+)
 
 
 
@@ -20,5 +23,34 @@ def test_disabled_when_flag_false():
         lambda: {"kanban": {"auto_decompose": False}}
     )
     assert enabled is False
+
+
+def test_block_loop_grace_default_is_300():
+    """No explicit config -> the fail-safe default (300s), not 0 (no grace),
+    so a fresh install is protected from the t_e3517120/t_59786b01 race."""
+    assert _resolve_auto_decompose_block_loop_grace_seconds(dict) == 300
+
+
+def test_block_loop_grace_reads_configured_value():
+    grace = _resolve_auto_decompose_block_loop_grace_seconds(
+        lambda: {"kanban": {"auto_decompose_block_loop_grace_seconds": 60}}
+    )
+    assert grace == 60
+
+
+def test_block_loop_grace_zero_means_opt_out():
+    """A user may explicitly set 0 to restore pre-fix immediate-decompose
+    behaviour; that must not be silently promoted back to the default."""
+    grace = _resolve_auto_decompose_block_loop_grace_seconds(
+        lambda: {"kanban": {"auto_decompose_block_loop_grace_seconds": 0}}
+    )
+    assert grace == 0
+
+
+def test_block_loop_grace_fails_safe_on_config_error():
+    def _boom():
+        raise RuntimeError("config read failed")
+
+    assert _resolve_auto_decompose_block_loop_grace_seconds(_boom) == 300
 
 

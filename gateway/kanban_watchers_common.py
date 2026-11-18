@@ -87,6 +87,27 @@ def _resolve_auto_decompose_settings(load_config: Callable[[], Any]) -> tuple[bo
     return bool(kcfg.get("auto_decompose", True)), max(per_tick, 1)
 
 
+def _resolve_auto_decompose_block_loop_grace_seconds(load_config: Callable[[], Any]) -> int:
+    """Live ``kanban.auto_decompose_block_loop_grace_seconds`` (default 300), re-read every tick.
+
+    Separate accessor (not folded into :func:`_resolve_auto_decompose_settings`'s tuple) so existing
+    2-tuple callers/tests are undisturbed. Fails safe to the default on any config read error — never
+    silently drops to 0 (no grace), which would reopen the race this setting exists to close (see
+    :func:`hermes_cli.kanban_decompose.list_triage_ids`'s docstring, t_e3517120/t_59786b01). Clamped
+    to ``>= 0``; 0 means "no grace", matching the pre-fix behaviour for anyone who opts back out.
+    """
+    try:
+        cfg = load_config()
+    except Exception:
+        return 300
+    kcfg = cfg.get("kanban", {}) if isinstance(cfg, dict) else {}
+    try:
+        grace = int(kcfg.get("auto_decompose_block_loop_grace_seconds", 300) or 0)
+    except (TypeError, ValueError):
+        grace = 300
+    return max(grace, 0)
+
+
 def _gc_retention_days() -> int:
     """``kanban.done_sub_retention_days`` (default 30; 0 disables), re-read per sweep; fails safe to 30."""
     try:
