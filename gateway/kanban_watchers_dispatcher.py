@@ -8,7 +8,6 @@ the singleton lock and the health telemetry; everything that only needs the
 from __future__ import annotations
 
 import contextlib
-import os
 import sqlite3
 import time
 from dataclasses import asdict, dataclass
@@ -244,14 +243,22 @@ class _KanbanDispatcher:
                             conn.close()
         return False
 
-    def auto_decompose_tick(self, auto_decompose_per_tick: int) -> int:
+    def auto_decompose_tick(self, auto_decompose_per_tick: int, block_loop_grace_seconds: int = 0) -> int:
         """Auto-decompose up to N triage tasks across all boards into ready workgraphs.
 
         Runs before dispatch fans out; the per-tick cap keeps a bulk triage
-        load from burst-spending the aux LLM. Returns the number decomposed.
+        load from burst-spending the aux LLM. ``block_loop_grace_seconds``
+        (``kanban.auto_decompose_block_loop_grace_seconds``) withholds a
+        triage card from THIS tick's candidates while it is still inside its
+        grace window after a ``block_loop_detected`` escalation — see
+        :func:`hermes_cli.kanban_decompose.list_triage_ids`'s docstring for
+        why (t_e3517120/t_59786b01: the decomposer raced an in-flight human
+        review reply and fanned out real duplicate work on an already-merged
+        PR). Returns the number decomposed.
         """
         try:
             from hermes_cli import kanban_decompose as _decomp
+            from hermes_cli.kanban_db import scoped_current_board
         except Exception as exc:  # pragma: no cover
             logger.warning("kanban auto-decompose: import failed (%s); skipping", exc)
             return 0
@@ -262,13 +269,19 @@ class _KanbanDispatcher:
             for slug in self._board_slugs():
                 if attempted >= auto_decompose_per_tick:
                     break
-                # Pin the board via env for the call: the decomposer connects
-                # with no board kwarg (same pattern as the dashboard specify endpoint).
-                prev_env = os.environ.get("HERMES_KANBAN_BOARD")
-                try:
-                    os.environ["HERMES_KANBAN_BOARD"] = slug
+                # The decomposer connects with no board kwarg. Pin the board for this context only: an
+                # env pin is process-wide, so for the whole aux-LLM call every gateway turn, kanban tool
+                # and spawned subprocess that names no board would resolve this one instead.
+                with scoped_current_board(slug):
                     try:
-                        triage_ids = _decomp.list_triage_ids()
+                        # Only pass the new kwarg when it would actually change behaviour —
+                        # grace<=0 calls the exact old zero-arg shape so any caller/test double
+                        # still matching that signature (pre-dating this kwarg) keeps working.
+                        triage_ids = (
+                            _decomp.list_triage_ids(min_triage_age_seconds=block_loop_grace_seconds)
+                            if block_loop_grace_seconds > 0
+                            else _decomp.list_triage_ids()
+                        )
                     except Exception as exc:
                         logger.debug("kanban auto-decompose: list_triage_ids failed on board %s (%s)", slug, exc)
                         triage_ids = []
@@ -277,11 +290,6 @@ class _KanbanDispatcher:
                             break
                         attempted += 1
                         successes += self._decompose_one(_decomp, slug, tid)
-                finally:
-                    if prev_env is None:
-                        os.environ.pop("HERMES_KANBAN_BOARD", None)
-                    else:
-                        os.environ["HERMES_KANBAN_BOARD"] = prev_env
         return successes
 
     @staticmethod

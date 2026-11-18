@@ -87,6 +87,36 @@ def _resolve_auto_decompose_settings(load_config: Callable[[], Any]) -> tuple[bo
     return bool(kcfg.get("auto_decompose", True)), max(per_tick, 1)
 
 
+def _resolve_auto_decompose_block_loop_grace_seconds(load_config: Callable[[], Any]) -> int:
+    """Live ``kanban.auto_decompose_block_loop_grace_seconds`` (default 900), re-read every tick.
+
+    Separate accessor (not folded into :func:`_resolve_auto_decompose_settings`'s tuple) so existing
+    2-tuple callers/tests are undisturbed. Fails safe to the default on any config read error — never
+    silently drops to 0 (no grace), which would reopen the race this setting exists to close (see
+    :func:`hermes_cli.kanban_decompose.list_triage_ids`'s docstring, t_e3517120/t_59786b01). Clamped
+    to ``>= 0``; 0 means "no grace", matching the pre-fix behaviour for anyone who opts back out.
+
+    900s (not the original 300s) with margin against the one data point we have: in the
+    t_e3517120 incident the reviewer's PASS landed at T+104s and the independently-verified
+    merge-exec reply (the one that actually resolved the card) landed at T+415s — a flat 300s
+    window still expires before T+415s, so that exact race could still occur under it. 900s
+    clears the observed latency with >2x margin. Belt-and-suspenders: this flat budget is only
+    the floor — :func:`hermes_cli.kanban_decompose.list_triage_ids` also pushes the window
+    forward on every comment posted after the ``block_loop_detected`` event, so a reviewer
+    thread that runs long doesn't get raced just because it crossed one fixed number.
+    """
+    try:
+        cfg = load_config()
+    except Exception:
+        return 900
+    kcfg = cfg.get("kanban", {}) if isinstance(cfg, dict) else {}
+    try:
+        grace = int(kcfg.get("auto_decompose_block_loop_grace_seconds", 900) or 0)
+    except (TypeError, ValueError):
+        grace = 900
+    return max(grace, 0)
+
+
 def _gc_retention_days() -> int:
     """``kanban.done_sub_retention_days`` (default 30; 0 disables), re-read per sweep; fails safe to 30."""
     try:

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from dataclasses import dataclass
 from typing import Optional
 
@@ -336,8 +337,80 @@ def decompose_task(
     return _apply_fanout(task_id, parsed, routing, audit_author)
 
 
-def list_triage_ids(*, tenant: Optional[str] = None) -> list[str]:
-    """Return task ids currently in the triage column."""
+def list_triage_ids(*, tenant: Optional[str] = None, min_triage_age_seconds: int = 0) -> list[str]:
+    """Return task ids currently in the triage column.
+
+    ``min_triage_age_seconds`` (auto-decompose's gateway tick only — manual
+    ``hermes kanban decompose`` / ``--all`` always pass 0, immediate by
+    design) excludes a task whose most recent ``block_loop_detected`` event
+    — or, if later, its most recent comment posted after that event — is
+    younger than this many seconds.
+
+    The unblock-loop breaker (``BLOCK_RECURRENCE_LIMIT`` in ``kanban_db.py``)
+    routes a card to ``triage`` the INSTANT a same-``kind`` block repeats —
+    including a legitimate ``needs_input`` card that was correctly waiting on
+    a named human reviewer and just got answered seconds earlier (the
+    recurrence counter only compares ``kind``, not whether the two blocks
+    were for the same unresolved cause). Running the decomposer against that
+    card before the in-flight human reply (review PASS, merge-exec) lands
+    spawns real duplicate workers on work that is already done — see
+    t_e3517120 / t_59786b01 (2026-11-18): a PR was independently re-verified
+    and merged one minute before the auto-decomposer fanned the same card
+    into 4 children, two of which started real duplicate work before a human
+    caught it. A grace window lets that kind of just-in-time reply resolve
+    the card on its own before the decomposer ever touches it.
+
+    A flat window measured only from the block event is still a race against
+    a reviewer thread that keeps going: the window's start is therefore the
+    LATER of the ``block_loop_detected`` event and the most recent comment
+    posted on the card after it (t_e3517120's own timeline had two replies —
+    a PASS at T+104s, then the merge-exec confirmation at T+415s — a single
+    fixed budget from the block event alone can't cover an arbitrarily long
+    back-and-forth). Every new comment pushes the required wait forward by
+    another full ``min_triage_age_seconds``, so the decomposer only acts once
+    the thread has actually gone quiet for that long.
+
+    A task that reached ``triage`` any OTHER way (operator `hermes kanban
+    triage`, direct status edit, a rough idea dropped by a user) has no
+    ``block_loop_detected`` event and is never held back by this.
+    """
     with kbc.connect_closing() as conn:
         rows = kb.list_tasks(conn, status="triage", tenant=tenant, limit=1000)
-    return [row.id for row in rows]
+        if min_triage_age_seconds <= 0:
+            return [row.id for row in rows]
+        now = int(time.time())
+        result = []
+        for row in rows:
+            entered_at = _latest_block_loop_detected_at(conn, row.id)
+            if entered_at is None:
+                result.append(row.id)
+                continue
+            last_reply_at = _latest_comment_at(conn, row.id, since_epoch=entered_at)
+            window_start = max(entered_at, last_reply_at) if last_reply_at is not None else entered_at
+            if (now - window_start) >= min_triage_age_seconds:
+                result.append(row.id)
+        return result
+
+
+def _latest_block_loop_detected_at(conn, task_id: str) -> Optional[int]:
+    """Epoch of the most recent ``block_loop_detected`` event on ``task_id``, or ``None``."""
+    row = conn.execute(
+        "SELECT created_at FROM task_events WHERE task_id = ? AND kind = 'block_loop_detected' "
+        "ORDER BY created_at DESC, id DESC LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    return kb._to_epoch(row["created_at"]) if row is not None else None
+
+
+def _latest_comment_at(conn, task_id: str, *, since_epoch: int) -> Optional[int]:
+    """Epoch of the most recent comment on ``task_id`` at/after ``since_epoch``, or ``None``.
+
+    Used to push the auto-decompose grace window forward on in-flight human
+    activity — see :func:`list_triage_ids`.
+    """
+    row = conn.execute(
+        "SELECT created_at FROM task_comments WHERE task_id = ? AND created_at >= ? "
+        "ORDER BY created_at DESC, id DESC LIMIT 1",
+        (task_id, since_epoch),
+    ).fetchone()
+    return kb._to_epoch(row["created_at"]) if row is not None else None
